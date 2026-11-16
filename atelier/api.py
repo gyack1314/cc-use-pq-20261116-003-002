@@ -8,9 +8,11 @@ from fastapi.responses import JSONResponse
 
 from .analysis import Analyzer
 from .domain import CampaignSpec, DomainError, integer, parse_time, require_identifier
+from .harmonization import Harmonizer
 from .ingest import Ingestor
 from .inspection import Inspector
 from .evidence import EvidenceService
+from .metrics import Interpretation
 from .release import Publisher
 from .reconcile import Reconciler
 from .query import QueryService
@@ -30,7 +32,8 @@ def create_app(database_path: str | None = None) -> FastAPI:
     query_service = QueryService(store)
     explorer = Explorer(store)
     lifecycle = Lifecycle(store)
-    app = FastAPI(title="Atelier Experiment Ledger", version="1.0.0")
+    harmonizer = Harmonizer(store)
+    app = FastAPI(title="Atelier Experiment Ledger", version="1.1.0")
 
     @app.exception_handler(DomainError)
     async def domain_error_handler(_, error: DomainError):
@@ -189,6 +192,79 @@ def create_app(database_path: str | None = None) -> FastAPI:
     @app.get("/campaigns/{campaign_id}/audits")
     def audits(campaign_id: str, since_id: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500)):
         return store.list_audits(campaign_id, since_id, limit)
+
+    # --------------------------------------------- 跨实验室解释版本与换算分析
+    @app.post("/campaigns/{campaign_id}/interpretations", status_code=201)
+    def create_interpretation(campaign_id: str, payload: dict[str, Any]):
+        require_identifier(campaign_id, "campaign_id")
+        actor = require_identifier(payload.get("actor"), "actor")
+        existing = store.list_interpretations(campaign_id)
+        version = len(existing) + 1
+        interpretation = Interpretation.from_dict(campaign_id, version, payload)
+        return store.create_interpretation(interpretation, actor)
+
+    @app.get("/campaigns/{campaign_id}/interpretations")
+    def list_interpretations(campaign_id: str):
+        return {"campaign_id": require_identifier(campaign_id, "campaign_id"),
+                "versions": store.list_interpretations(require_identifier(campaign_id, "campaign_id"))}
+
+    @app.get("/campaigns/{campaign_id}/interpretations/{version}")
+    def get_interpretation(campaign_id: str, version: int):
+        return store.get_interpretation(campaign_id, integer(version, "version", 1, 1_000_000)).to_dict()
+
+    @app.post("/campaigns/{campaign_id}/harmonized-analyses/{analysis_id}")
+    def build_harmonized(campaign_id: str, analysis_id: str, payload: dict[str, Any]):
+        version = payload.get("interpretation_version")
+        return harmonizer.build(
+            campaign_id, analysis_id, payload.get("start"), payload.get("end"),
+            payload.get("indicators"),
+            integer(version, "interpretation_version", 1, 1_000_000) if version is not None else None,
+            payload.get("actor"))
+
+    @app.get("/campaigns/{campaign_id}/harmonized-analyses")
+    def list_harmonized(campaign_id: str, limit: int = Query(100, ge=1, le=500)):
+        require_identifier(campaign_id, "campaign_id")
+        return {"campaign_id": campaign_id,
+                "analyses": store.list_harmonized_analyses(campaign_id, limit)}
+
+    @app.get("/campaigns/{campaign_id}/harmonized-analyses/{analysis_id}")
+    def get_harmonized(campaign_id: str, analysis_id: str):
+        return store.get_harmonized_analysis(campaign_id, analysis_id)["body"]
+
+    @app.get("/campaigns/{campaign_id}/harmonized-analyses/{analysis_id}/status")
+    def harmonized_status(campaign_id: str, analysis_id: str):
+        return harmonizer.status(campaign_id, analysis_id)
+
+    @app.post("/campaigns/{campaign_id}/harmonized-analyses/{analysis_id}/reviews")
+    def harmonized_review(campaign_id: str, analysis_id: str, payload: dict[str, Any]):
+        return harmonizer.review(campaign_id, analysis_id, payload.get("reviewer"),
+                                 payload.get("decision"), payload.get("note"),
+                                 payload.get("expected_sha"))
+
+    @app.get("/campaigns/{campaign_id}/harmonized-analyses/{analysis_id}/reviews")
+    def harmonized_reviews(campaign_id: str, analysis_id: str):
+        return store.list_harmonized_reviews(campaign_id, analysis_id)
+
+    @app.post("/campaigns/{campaign_id}/harmonized-releases/{release_id}")
+    def harmonized_publish(campaign_id: str, release_id: str, payload: dict[str, Any]):
+        return harmonizer.publish(campaign_id, payload.get("analysis_id"), release_id,
+                                  payload.get("actor"), payload.get("expected_sha"))
+
+    @app.get("/campaigns/{campaign_id}/harmonized-releases")
+    def harmonized_releases(campaign_id: str):
+        return store.list_harmonized_releases(campaign_id)
+
+    @app.get("/campaigns/{campaign_id}/harmonized-releases/{release_id}")
+    def harmonized_release(campaign_id: str, release_id: str):
+        return store.get_harmonized_release(campaign_id, release_id)["body"]
+
+    @app.get("/campaigns/{campaign_id}/harmonized-analyses/{first_id}/compare/{second_id}")
+    def harmonized_compare(campaign_id: str, first_id: str, second_id: str):
+        return harmonizer.compare(campaign_id, first_id, second_id)
+
+    @app.get("/campaigns/{campaign_id}/harmonized-lifecycle")
+    def harmonized_lifecycle(campaign_id: str):
+        return harmonizer.inventory(campaign_id)
 
     @app.get("/health")
     def health():

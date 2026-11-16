@@ -81,6 +81,16 @@ class MetricRule:
     maximum: Decimal
     required: bool
     precision: int
+    definition_version: str = "1"
+    accepted_units: tuple[str, ...] = ()
+    intake_bounds: dict[str, tuple[Decimal, Decimal]] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.accepted_units:
+            object.__setattr__(self, "accepted_units", (self.unit,))
+        if self.intake_bounds is None:
+            object.__setattr__(self, "intake_bounds",
+                               {self.unit: (self.minimum, self.maximum)})
 
     @classmethod
     def from_dict(cls, item: dict[str, Any]) -> MetricRule:
@@ -90,6 +100,13 @@ class MetricRule:
         unit = item.get("unit")
         if unit not in ALLOWED_UNITS:
             raise DomainError("invalid_unit", f"metric {name} has unsupported unit")
+        accepted = item.get("accepted_units", [unit])
+        if not isinstance(accepted, list) or not accepted or any(u not in ALLOWED_UNITS for u in accepted):
+            raise DomainError("invalid_unit", f"metric {name} has an unsupported accepted unit")
+        if unit not in accepted:
+            raise DomainError("invalid_rule", f"metric {name} canonical unit must be accepted for intake")
+        if len(set(accepted)) != len(accepted):
+            raise DomainError("invalid_rule", f"metric {name} accepted units must be unique")
         minimum = decimal(item.get("minimum"), "minimum")
         maximum = decimal(item.get("maximum"), "maximum")
         if minimum >= maximum:
@@ -98,19 +115,61 @@ class MetricRule:
         if not isinstance(required, bool):
             raise DomainError("invalid_rule", "required must be boolean")
         precision = integer(item.get("precision", 3), "precision", 0, 9)
-        return cls(name, unit, minimum, maximum, required, precision)
+        definition_version = item.get("definition_version", "1")
+        if not isinstance(definition_version, str) or not re.fullmatch(
+                r"[0-9A-Za-z][0-9A-Za-z._-]{0,15}", definition_version):
+            raise DomainError("invalid_rule", f"metric {name} has an invalid definition_version")
+        # 按报送单位的历史接收范围：缺省回落到规格主范围，保证旧数据行为不变。
+        intake_bounds: dict[str, tuple[Decimal, Decimal]] = {unit: (minimum, maximum)}
+        supplied_bounds = item.get("intake_bounds", {})
+        if not isinstance(supplied_bounds, dict):
+            raise DomainError("invalid_rule", f"metric {name} intake_bounds must be an object")
+        for source_unit, bounds in supplied_bounds.items():
+            if source_unit not in accepted:
+                raise DomainError("invalid_rule",
+                                  f"metric {name} intake_bounds name an unaccepted unit")
+            if not isinstance(bounds, dict):
+                raise DomainError("invalid_rule", f"metric {name} intake bounds must be an object")
+            low = decimal(bounds.get("minimum"), "minimum")
+            high = decimal(bounds.get("maximum"), "maximum")
+            if low >= high:
+                raise DomainError("invalid_rule",
+                                  f"metric {name} intake bounds for {source_unit} are reversed")
+            intake_bounds[source_unit] = (low, high)
+        return cls(name, unit, minimum, maximum, required, precision,
+                   definition_version, tuple(accepted), intake_bounds)
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "unit": self.unit, "minimum": str(self.minimum),
-                "maximum": str(self.maximum), "required": self.required, "precision": self.precision}
+                "maximum": str(self.maximum), "required": self.required, "precision": self.precision,
+                "definition_version": self.definition_version,
+                "accepted_units": list(self.accepted_units),
+                "intake_bounds": {source: {"minimum": str(low), "maximum": str(high)}
+                                  for source, (low, high) in self.intake_bounds.items()}}
 
-    def check(self, value: Any) -> str:
+    def check(self, value: Any, source_unit: str | None = None) -> str:
         number = decimal(value, self.name)
-        if number < self.minimum or number > self.maximum:
+        low, high = self.intake_bounds[source_unit or self.unit]
+        if number < low or number > high:
             raise DomainError("out_of_range", f"{self.name} is outside declared bounds")
         if abs(number.as_tuple().exponent) > self.precision:
             raise DomainError("excess_precision", f"{self.name} exceeds declared precision")
         return str(number)
+
+    def intake(self, entry: Any) -> tuple[str, str]:
+        """解析一条测量，返回 (原值文本, 原单位)。
+
+        支持两种报送形式：纯数字字符串（单位取规格单位，保持历史兼容）
+        或 ``{"value": "...", "unit": "mAh"}`` 显式单位。原值按报送精度
+        与该单位当时规格的有效范围校验，不做任何换算。
+        """
+        if isinstance(entry, dict) and set(entry) <= {"value", "unit"}:
+            source_unit = entry.get("unit", self.unit)
+            if source_unit not in self.accepted_units:
+                raise DomainError("invalid_unit",
+                                  f"{self.name} does not accept intake unit {source_unit}")
+            return self.check(entry.get("value"), source_unit), source_unit
+        return self.check(entry), self.unit
 
 
 @dataclass(frozen=True)
@@ -162,7 +221,12 @@ class CampaignSpec:
                 "min_samples": self.min_samples, "max_bad_fraction": str(self.max_bad_fraction),
                 "window_hours": self.window_hours}
 
-    def validate_measurements(self, measurements: Any) -> dict[str, str]:
+    def validate_measurements(self, measurements: Any) -> tuple[dict[str, str], dict[str, str]]:
+        """校验一批测量，返回 (原值字典, 原单位字典)。
+
+        原值与原单位分开保存：账本永远保留报送时的数值尺度，换算只发生在
+        选定解释版本之后的分析阶段。
+        """
         if not isinstance(measurements, dict):
             raise DomainError("invalid_measurements", "measurements must be an object")
         if not all(isinstance(name, str) for name in measurements):
@@ -171,11 +235,14 @@ class CampaignSpec:
         unknown = set(measurements) - allowed
         if unknown:
             raise DomainError("unknown_metric", f"undeclared metrics: {', '.join(sorted(unknown))}")
-        normalized = {}
+        normalized: dict[str, str] = {}
+        units: dict[str, str] = {}
         for rule in self.rules:
             if rule.name not in measurements or measurements[rule.name] is None:
                 if rule.required:
                     raise DomainError("missing_metric", f"required metric {rule.name} is missing")
                 continue
-            normalized[rule.name] = rule.check(measurements[rule.name])
-        return normalized
+            value, source_unit = rule.intake(measurements[rule.name])
+            normalized[rule.name] = value
+            units[rule.name] = source_unit
+        return normalized, units

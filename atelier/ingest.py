@@ -15,9 +15,10 @@ def normalize_sample(spec: CampaignSpec, item: Any) -> dict[str, Any]:
     if group_id not in spec.groups:
         raise DomainError("unknown_group", "sample group is not declared")
     event_time = parse_time(item.get("event_time"))
-    measurements = spec.validate_measurements(item.get("measurements"))
+    measurements, measurement_units = spec.validate_measurements(item.get("measurements"))
     return {"sample_id": sample_id, "group_id": group_id, "event_time": event_time,
-            "measurements": measurements, "spec_version": spec.version}
+            "measurements": measurements, "measurement_units": measurement_units,
+            "spec_version": spec.version}
 
 
 class Ingestor:
@@ -60,10 +61,11 @@ class Ingestor:
                             raise DomainError("already_ingested", "sample was already accepted")
                         raise DomainError("sample_conflict", "sample id has different accepted content")
                     db.execute("INSERT INTO samples(campaign_id,sample_id,batch_id,group_id,event_time,"
-                               "spec_version,measurements,content_sha,status,created_at,updated_at)"
-                               "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                               "spec_version,measurements,measurement_units,content_sha,status,created_at,updated_at)"
+                               "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                                (campaign_id, sample_id, batch_id, sample["group_id"], sample["event_time"],
-                                spec.version, canonical(sample["measurements"]), digest(sample),
+                                spec.version, canonical(sample["measurements"]),
+                                canonical(sample["measurement_units"]), digest(sample),
                                 "active", now, now))
                     accepted.append(sample_id)
                 except DomainError as error:
@@ -111,14 +113,18 @@ class Ingestor:
                 raise DomainError("identity_change", "correction cannot change sample id")
             previous = {"sample_id": sample_id, "group_id": row["group_id"],
                         "event_time": row["event_time"], "spec_version": row["spec_version"],
-                        "measurements": json.loads(row["measurements"]), "content_sha": row["content_sha"]}
+                        "measurements": json.loads(row["measurements"]),
+                        "measurement_units": json.loads(row["measurement_units"]),
+                        "content_sha": row["content_sha"]}
             next_sha = digest(normalized)
             if next_sha == row["content_sha"]:
                 return {**previous, "changed": False}
             db.execute("UPDATE samples SET group_id=?, event_time=?,spec_version=?,measurements=?,"
-                       "content_sha=?,updated_at=? WHERE campaign_id=? AND sample_id=?",
+                       "measurement_units=?,content_sha=?,updated_at=? WHERE campaign_id=? AND sample_id=?",
                        (normalized["group_id"], normalized["event_time"], spec.version,
-                        canonical(normalized["measurements"]), next_sha, utc_now(), campaign_id, sample_id))
+                        canonical(normalized["measurements"]),
+                        canonical(normalized["measurement_units"]), next_sha, utc_now(),
+                        campaign_id, sample_id))
             self.store.bump(db, campaign_id)
             result = {**normalized, "content_sha": next_sha, "changed": True}
             self.store.audit(db, campaign_id, "sample_corrected", actor, sample_id, previous, result)

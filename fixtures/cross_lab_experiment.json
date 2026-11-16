@@ -1,0 +1,88 @@
+{
+  "campaign": {
+    "campaign_id": "cell_capacity_trial",
+    "title": "Synthetic cross-laboratory cell capacity comparison",
+    "groups": ["control", "process_b"],
+    "baseline": "control",
+    "metrics": [
+      {"name": "capacity", "unit": "Ah", "minimum": "0", "maximum": "1000",
+       "precision": 4, "definition_version": "d1",
+       "accepted_units": ["Ah", "mAh"],
+       "intake_bounds": {"mAh": {"minimum": "0", "maximum": "1000000"}}}
+    ],
+    "min_samples": 2,
+    "max_bad_fraction": "0.25",
+    "window_hours": 48
+  },
+  "window": {"start": "2026-02-01T00:00:00Z", "end": "2026-02-03T00:00:00Z"},
+  "batches": [
+    {
+      "batch_id": "lab_alpha_ah",
+      "samples": [
+        {"sample_id": "alpha_1", "group_id": "control",
+         "event_time": "2026-02-01T01:00:00Z",
+         "measurements": {"capacity": {"value": "4.80", "unit": "Ah"}}},
+        {"sample_id": "alpha_2", "group_id": "control",
+         "event_time": "2026-02-01T02:00:00Z",
+         "measurements": {"capacity": {"value": "4.90", "unit": "Ah"}}},
+        {"sample_id": "alpha_3", "group_id": "process_b",
+         "event_time": "2026-02-01T03:00:00Z",
+         "measurements": {"capacity": {"value": "5.20", "unit": "Ah"}}}
+      ]
+    },
+    {
+      "batch_id": "lab_beta_mah",
+      "samples": [
+        {"sample_id": "beta_1", "group_id": "control",
+         "event_time": "2026-02-01T04:00:00Z",
+         "measurements": {"capacity": {"value": "4850", "unit": "mAh"}}},
+        {"sample_id": "beta_2", "group_id": "process_b",
+         "event_time": "2026-02-01T05:00:00Z",
+         "measurements": {"capacity": {"value": "5250", "unit": "mAh"}}},
+        {"sample_id": "beta_3", "group_id": "process_b",
+         "event_time": "2026-02-01T06:00:00Z",
+         "measurements": {"capacity": {"value": "5150", "unit": "mAh"}}}
+      ]
+    }
+  ],
+  "interpretations": {
+    "v1": {
+      "indicators": [
+        {"indicator_id": "usable_capacity", "definition": "Discharge capacity under the d1 reference protocol",
+         "definition_version": "d1", "unit": "Ah",
+         "minimum": "0", "maximum": "10", "precision": 4}
+      ],
+      "conversions": [
+        {"rule_id": "mah_to_ah", "from_unit": "mAh", "to_unit": "Ah",
+         "factor": "0.001", "offset": "0",
+         "basis": "SI prefix definition: 1 Ah = 1000 mAh (laboratory metrology manual rev3)"}
+      ],
+      "mappings": [
+        {"metric": "capacity", "unit": "Ah", "spec_versions": [1],
+         "indicator_id": "usable_capacity", "definition_version": "d1", "equivalent": true},
+        {"metric": "capacity", "unit": "mAh", "spec_versions": [1],
+         "indicator_id": "usable_capacity", "definition_version": "d1", "equivalent": true}
+      ]
+    },
+    "v2_redefined": {
+      "indicators": [
+        {"indicator_id": "usable_capacity", "definition": "Discharge capacity under the revised d2 protocol",
+         "definition_version": "d2", "unit": "Ah",
+         "minimum": "0", "maximum": "10", "precision": 4}
+      ],
+      "conversions": [
+        {"rule_id": "mah_to_ah", "from_unit": "mAh", "to_unit": "Ah",
+         "factor": "0.001", "offset": "0",
+         "basis": "SI prefix definition: 1 Ah = 1000 mAh (laboratory metrology manual rev3)"}
+      ],
+      "mappings": [
+        {"metric": "capacity", "unit": "Ah", "spec_versions": [1],
+         "indicator_id": "usable_capacity", "definition_version": "d2", "equivalent": false,
+         "reason": "Protocol d2 changes discharge current; same name and convertible units but not the same indicator"},
+        {"metric": "capacity", "unit": "mAh", "spec_versions": [1],
+         "indicator_id": "usable_capacity", "definition_version": "d2", "equivalent": false,
+         "reason": "Protocol d2 changes discharge current; same name and convertible units but not the same indicator"}
+      ]
+    }
+  }
+}

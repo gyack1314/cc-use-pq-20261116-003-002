@@ -64,13 +64,37 @@ class EvidenceService:
                 supplied = body.pop("release_sha", None)
                 if digest(body) != supplied or body["result_sha"] != row["result_sha"]:
                     issues.append({"kind": "release_digest", "release_id": row["release_id"]})
+            interpretation_rows = db.execute("SELECT version,body,content_sha FROM interpretations"
+                                             " WHERE campaign_id=? ORDER BY version",
+                                             (campaign_id,)).fetchall()
+            for row in interpretation_rows:
+                if digest(json.loads(row["body"])) != row["content_sha"]:
+                    issues.append({"kind": "interpretation_digest", "version": row["version"]})
+            harmonized_rows = db.execute("SELECT analysis_id,body,result_sha FROM harmonized_analyses"
+                                         " WHERE campaign_id=?", (campaign_id,)).fetchall()
+            for row in harmonized_rows:
+                body = json.loads(row["body"])
+                supplied = body.pop("result_sha", None)
+                if digest(body) != row["result_sha"] or supplied != row["result_sha"]:
+                    issues.append({"kind": "harmonized_analysis_digest", "analysis_id": row["analysis_id"]})
+            harmonized_release_rows = db.execute("SELECT release_id,body,result_sha FROM harmonized_releases"
+                                                 " WHERE campaign_id=?", (campaign_id,)).fetchall()
+            for row in harmonized_release_rows:
+                body = json.loads(row["body"])
+                supplied = body.pop("release_sha", None)
+                if digest(body) != supplied or body["result_sha"] != row["result_sha"]:
+                    issues.append({"kind": "harmonized_release_digest", "release_id": row["release_id"]})
             audits = db.execute("SELECT id,kind,subject FROM audits WHERE campaign_id=? ORDER BY id",
                                 (campaign_id,)).fetchall()
             event_kinds = Counter(row["kind"] for row in audits)
             return {"campaign_id": campaign_id, "ok": not issues, "issues": issues,
                     "counts": {"spec_versions": len(specs), "batches": len(batch_rows),
                                "samples": len(sample_rows), "analyses": len(analysis_rows),
-                               "releases": len(release_rows), "audits": len(audits)},
+                               "releases": len(release_rows),
+                               "interpretations": len(interpretation_rows),
+                               "harmonized_analyses": len(harmonized_rows),
+                               "harmonized_releases": len(harmonized_release_rows),
+                               "audits": len(audits)},
                     "event_kinds": dict(sorted(event_kinds.items()))}
 
     def export(self, campaign_id: str) -> dict[str, Any]:
@@ -98,9 +122,28 @@ class EvidenceService:
             releases = [dict(row) for row in db.execute(
                 "SELECT release_id,analysis_id,source_revision,result_sha,created_at"
                 " FROM releases WHERE campaign_id=? ORDER BY created_at,release_id", (campaign_id,))]
+            interpretations = [dict(row) for row in db.execute(
+                "SELECT version,content_sha,created_at FROM interpretations"
+                " WHERE campaign_id=? ORDER BY version", (campaign_id,))]
+            harmonized_analyses = [dict(row) for row in db.execute(
+                "SELECT analysis_id,request_sha,interpretation_version,source_revision,result_sha,created_at"
+                " FROM harmonized_analyses WHERE campaign_id=? ORDER BY created_at,analysis_id",
+                (campaign_id,))]
+            harmonized_reviews = [dict(row) for row in db.execute(
+                "SELECT analysis_id,reviewer,decision,note,result_sha,created_at FROM harmonized_reviews"
+                " WHERE campaign_id=? ORDER BY analysis_id,reviewer", (campaign_id,))]
+            harmonized_releases = [dict(row) for row in db.execute(
+                "SELECT release_id,analysis_id,interpretation_version,source_revision,result_sha,created_at"
+                " FROM harmonized_releases WHERE campaign_id=? ORDER BY created_at,release_id",
+                (campaign_id,))]
             audits = self.store.list_audits(campaign_id, limit=100000)
             payload = {"campaign": campaign, "specs": specs, "batches": batches,
                        "samples": samples, "rejections": rejections, "analyses": analyses,
-                       "reviews": reviews, "releases": releases, "audits": audits}
+                       "reviews": reviews, "releases": releases,
+                       "interpretations": interpretations,
+                       "harmonized_analyses": harmonized_analyses,
+                       "harmonized_reviews": harmonized_reviews,
+                       "harmonized_releases": harmonized_releases,
+                       "audits": audits}
             return {"campaign_id": campaign_id, "payload": payload, "digest": digest(payload),
                     "verification": verification}
